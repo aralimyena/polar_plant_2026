@@ -1,7 +1,5 @@
-# polar-plant-dashboard/main.py
-
+import os
 import io
-import re
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -43,48 +41,7 @@ def setup_korean_font():
 setup_korean_font()
 
 # ─────────────────────────────────────────────
-# 2. 파일명에서 학교 이름 추출
-# ─────────────────────────────────────────────
-def extract_school_name(filename):
-    """
-    '인천아라고등학교_환경데이터.csv' 또는 'OO고등학교_생육결과데이터.csv' 같은
-    파일명에서 학교 이름 부분을 추출한다.
-    패턴: <학교이름>_(환경데이터|생육결과데이터|생육결과|환경|growth|env).csv
-    """
-    if filename is None:
-        return None
-
-    # 확장자 제거
-    base = filename.rsplit('.', 1)[0] if '.' in filename else filename
-
-    # 가장 일반적인 패턴: 학교이름_구분정보
-    # 구분 정보 제거 후 앞부분을 학교 이름으로
-    patterns = [
-        r'^(.+?)_환경데이터$',
-        r'^(.+?)_생육결과데이터$',
-        r'^(.+?)_환경$',
-        r'^(.+?)_생육$',
-        r'^(.+?)_성장$',
-        r'^(.+?)_growth$',
-        r'^(.+?)_env$',
-    ]
-    for pat in patterns:
-        m = re.match(pat, base)
-        if m:
-            return m.group(1)
-
-    # 패턴 매칭 실패 → 밑줄 기준으로 마지막 구분자 앞까지 학교 이름으로 간주
-    parts = base.split('_')
-    if len(parts) >= 2:
-        # 마지막 부분(구분자)에 영문 구분이 있으면 그 앞까지를 학교 이름
-        last = parts[-1].lower()
-        if any(k in last for k in ['환경', '생육', '성장', 'growth', 'env', 'data']):
-            return '_'.join(parts[:-1])
-
-    return base  # 파일명 자체를 학교 이름으로 fallback
-
-# ─────────────────────────────────────────────
-# 3. 통계 용어 설명 (고등학생용)
+# 2. 통계 용어 설명 (고등학생용)
 # ─────────────────────────────────────────────
 TERM_NOTES = {
     '평균': '모든 값을 더해 개수로 나눈 값 — 자료의 대표값',
@@ -96,7 +53,7 @@ TERM_NOTES = {
 }
 
 # ─────────────────────────────────────────────
-# 4. CSV 읽기 — 인코딩 유연 처리
+# 3. CSV 읽기 — 인코딩 유연 처리
 # ─────────────────────────────────────────────
 def read_csv_flexible(file_bytes):
     """utf-8-sig → cp949 → utf-8 순으로 시도하여 CSV를 읽는다."""
@@ -105,12 +62,27 @@ def read_csv_flexible(file_bytes):
             return pd.read_csv(io.BytesIO(file_bytes), encoding=enc)
         except (UnicodeDecodeError, pd.errors.ParserError):
             continue
-    raise ValueError("CSV 인코딩을 인식하지 못했습니다. utf-8-sig 또는 cp949로 저장된 파일인지 확인하세요.")
+    raise ValueError(
+        "CSV 인코딩을 인식하지 못했습니다. "
+        "utf-8-sig 또는 cp949로 저장된 파일인지 확인하세요."
+    )
+
+# ─────────────────────────────────────────────
+# 4. 파일명에서 학교 이름 추출
+# ─────────────────────────────────────────────
+def extract_school_name(filename: str) -> str:
+    """'인천아라고등학교_환경데이터.csv' → '인천아라고등학교'"""
+    base = os.path.basename(filename)
+    name = base.split('_')[0]
+    if name.endswith('.csv'):
+        name = name[:-4]
+    return name
 
 # ─────────────────────────────────────────────
 # 5. 환경 데이터 열 이름 매핑
 # ─────────────────────────────────────────────
 def map_env_columns(df):
+    """학교마다 다른 환경 데이터 열 이름을 표준 키로 매핑한다."""
     col_lookup = {c.strip(): c for c in df.columns}
 
     def find_col(*keys):
@@ -120,19 +92,20 @@ def map_env_columns(df):
         return None
 
     return {
-        'time_col':      find_col('time', '시간', 'date', '일시', '타임스탬프'),
-        'temp_col':      find_col('temperature', '온도', 'temp'),
-        'humidity_col':  find_col('humidity', '습도', 'rh'),
-        'ec_col':        find_col('ec', 'EC', '전기전도도'),
-        'ph_col':        find_col('ph', 'PH', '수소이온농도', '산도'),
-        'water_temp_col':find_col('water_temp', '수온', 'water temperature'),
-        'co2_col':       find_col('co2', 'CO2', '이산화탄소'),
+        'time_col':       find_col('time', '시간', 'date', '일시', '타임스탬프'),
+        'temp_col':       find_col('temperature', '온도', 'temp'),
+        'humidity_col':   find_col('humidity', '습도', 'rh'),
+        'ec_col':         find_col('ec', 'EC', '전기전도도'),
+        'ph_col':         find_col('ph', 'PH', '수소이온농도', '산도'),
+        'water_temp_col': find_col('water_temp', '수온', 'water temperature'),
+        'co2_col':        find_col('co2', 'CO2', '이산화탄소'),
     }
 
 # ─────────────────────────────────────────────
 # 6. 생육 결과 데이터 열 이름 매핑
 # ─────────────────────────────────────────────
 def map_growth_columns(df):
+    """학교마다 다른 생육 결과 데이터 열 이름을 표준 키로 매핑한다."""
     col_lookup = {c.strip(): c for c in df.columns}
 
     def find_col(*keys):
@@ -144,24 +117,34 @@ def map_growth_columns(df):
     return {
         'id_col':         find_col('개체번호', '개체번호 ', 'plant_id', 'id', '번호'),
         'leaf_col':       find_col('잎 수(장)', '잎수', '잎 수', 'leaf_count', '잎'),
-        'above_len_col':  find_col('지상부 길이(mm)', '지상부길이(mm)', '지상부 길이',
-                                   '지상부길이', 'shoot_length',
-                                   '지상부길이 (mm)', '지상부 길이 (mm)'),
-        'below_len_col':  find_col('지하부길이(mm)', '지하부 길이(mm)', '지하부길이',
-                                   '지하부 길이', 'root_length',
-                                   '지하부길이 (mm)', '지하부 길이 (mm)'),
-        'fresh_col':      find_col('생중량(g)', '생중량', 'fresh_weight',
-                                   '생체중량(g)', '생체중량'),
-        'shoot_mass_col': find_col('지상부질량(g)', '지상부질량', '지상부 질량(g)',
-                                   'shoot_mass', '지상부질량 (g)', '지상부 질량 (g)'),
-        'root_mass_col':  find_col('지하부질량(g)', '지하부질량', '지하부 질량(g)',
-                                   'root_mass', '지하부질량 (g)', '지하부 질량 (g)'),
+        'above_len_col':  find_col(
+            '지상부 길이(mm)', '지상부길이(mm)', '지상부 길이',
+            '지상부길이', 'shoot_length',
+            '지상부길이 (mm)', '지상부 길이 (mm)',
+        ),
+        'below_len_col':  find_col(
+            '지하부길이(mm)', '지하부 길이(mm)', '지하부길이',
+            '지하부 길이', 'root_length',
+            '지하부길이 (mm)', '지하부 길이 (mm)',
+        ),
+        'fresh_col':      find_col(
+            '생중량(g)', '생중량', 'fresh_weight', '생체중량(g)', '생체중량'
+        ),
+        'shoot_mass_col': find_col(
+            '지상부질량(g)', '지상부질량', '지상부 질량(g)',
+            'shoot_mass', '지상부질량 (g)', '지상부 질량 (g)',
+        ),
+        'root_mass_col':  find_col(
+            '지하부질량(g)', '지하부질량', '지하부 질량(g)',
+            'root_mass', '지하부질량 (g)', '지하부 질량 (g)',
+        ),
     }
 
 # ─────────────────────────────────────────────
 # 7. 환경 데이터 후처리
 # ─────────────────────────────────────────────
 def process_env_data(df, mapped):
+    """시간 열을 datetime으로 변환하고 시간순 정렬한다."""
     time_col = mapped['time_col']
     if time_col is None:
         return df, None
@@ -172,7 +155,8 @@ def process_env_data(df, mapped):
     except Exception:
         df['_time'] = pd.to_datetime(
             df[time_col].astype(str).str.replace('_', ' ', regex=False),
-            format='%Y%m%d %H', errors='coerce'
+            format='%Y%m%d %H',
+            errors='coerce',
         )
 
     df = df.sort_values('_time').reset_index(drop=True)
@@ -186,44 +170,44 @@ def process_growth_data(df_raw, mapped):
     d = mapped
     num_cols = []
 
-    for attr in ['leaf_col', 'above_len_col', 'below_len_col',
-                 'fresh_col', 'shoot_mass_col', 'root_mass_col']:
+    for attr in [
+        'leaf_col', 'above_len_col', 'below_len_col',
+        'fresh_col', 'shoot_mass_col', 'root_mass_col',
+    ]:
         col = d.get(attr)
         if col and col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
             num_cols.append(col)
 
+    # 생중량 결측 처리: 지상부질량 + 지하부질량
     if (d['fresh_col'] is None or d['fresh_col'] not in df.columns) \
        and d['shoot_mass_col'] and d['root_mass_col'] \
-       and d['shoot_mass_col'] in df.columns and d['root_mass_col'] in df.columns:
+       and d['shoot_mass_col'] in df.columns \
+       and d['root_mass_col'] in df.columns:
         df['생중량(g)'] = df[d['shoot_mass_col']] + df[d['root_mass_col']]
         d['fresh_col'] = '생중량(g)'
         if '생중량(g)' not in num_cols:
             num_cols.append('생중량(g)')
 
+    # 개체번호를 문자열로
     if d['id_col'] and d['id_col'] in df.columns:
         df['_id_str'] = df[d['id_col']].astype(str)
 
     analysis_cols = [c for c in num_cols if c in df.columns]
-    df_clean = df.dropna(subset=analysis_cols).reset_index(drop=True) if analysis_cols else df.copy()
+    df_clean = (
+        df.dropna(subset=analysis_cols).reset_index(drop=True)
+        if analysis_cols else df.copy()
+    )
 
     return df, df_clean, d, num_cols
 
 # ─────────────────────────────────────────────
 # 9. Streamlit 대시보드
 # ─────────────────────────────────────────────
-# 파일명 기반 학교 이름 추출
-school_name_from_env = None
-school_name_from_growth = None
-if 'env_file' in st.session_state and st.session_state.get('env_file') is not None:
-    school_name_from_env = extract_school_name(st.session_state.env_file.name)
-if 'growth_file' in st.session_state and st.session_state.get('growth_file') is not None:
-    school_name_from_growth = extract_school_name(st.session_state.growth_file.name)
+st.set_page_config(page_title='극지식물 생육 차이 분석 대시보드', layout='wide')
 
-school_name = school_name_from_env or school_name_from_growth or '우리 학교'
-page_title = f'{school_name} 극지식물 생육 차이 분석'
-st.set_page_config(page_title=page_title, layout='wide')
-st.title(f'🌿 {school_name} 극지식물 개체별 생육 차이 분석 대시보드')
+default_school = '인천아라고등학교'
+st.title(f'🌿 {default_school} 극지식물 개체별 생육 차이 분석 대시보드')
 st.caption(
     'CSV를 업로드하면 학교마다 다른 열 이름·인코딩을 자동으로 처리하여 분석합니다.'
 )
@@ -233,17 +217,16 @@ st.sidebar.header('📁 데이터 업로드')
 env_file = st.sidebar.file_uploader(
     '환경 데이터 (CSV)',
     type=['csv'],
-    help='time, temperature, humidity 등이 포함된 파일 (utf-8-sig / cp949 지원)',
+    help=(
+        'time, temperature, humidity 등이 포함된 파일 '
+        '(utf-8-sig / cp949 지원)'
+    ),
 )
 growth_file = st.sidebar.file_uploader(
     '생육 결과 데이터 (CSV)',
     type=['csv'],
     help='개체번호, 잎 수, 길이, 질량 등이 포함된 파일',
 )
-
-# 파일명 정보 저장 (세션 스테이트에 보관하여 학교 이름 추출에 사용)
-st.session_state.env_file = env_file
-st.session_state.growth_file = growth_file
 
 # ── 데이터 로드 ──
 env_df_raw = None
@@ -256,13 +239,25 @@ growth_clean = None
 growth_d = None
 growth_num_cols = None
 
+school_name = default_school
+if env_file is not None:
+    school_name = extract_school_name(env_file.name)
+elif growth_file is not None:
+    school_name = extract_school_name(growth_file.name)
+
+if school_name != default_school:
+    st.title(f'🌿 {school_name} 극지식물 개체별 생육 차이 분석 대시보드')
+
 if env_file is not None:
     try:
         env_bytes = env_file.read()
         env_df_raw = read_csv_flexible(env_bytes)
         env_mapped = map_env_columns(env_df_raw)
         env_processed, env_time_col = process_env_data(env_df_raw, env_mapped)
-        st.sidebar.success(f'✅ 환경 데이터 로드 — {len(env_df_raw)}행 × {len(env_df_raw.columns)}열')
+        st.sidebar.success(
+            f'✅ 환경 데이터 로드 — '
+            f'{len(env_df_raw)}행 × {len(env_df_raw.columns)}열'
+        )
         st.sidebar.caption(f'열: {", ".join(env_df_raw.columns)}')
     except Exception as e:
         st.sidebar.error(f'환경 데이터 읽기 오류: {e}')
@@ -275,14 +270,18 @@ if growth_file is not None:
         _, growth_clean, growth_d, growth_num_cols = process_growth_data(
             growth_df_raw, growth_mapped
         )
-        st.sidebar.success(f'✅ 생육 데이터 로드 — {len(growth_df_raw)}개체 × {len(growth_df_raw.columns)}열')
+        st.sidebar.success(
+            f'✅ 생육 데이터 로드 — '
+            f'{len(growth_df_raw)}개체 × {len(growth_df_raw.columns)}열'
+        )
         st.sidebar.caption(f'열: {", ".join(growth_df_raw.columns)}')
     except Exception as e:
         st.sidebar.error(f'생육 데이터 읽기 오류: {e}')
 
 if env_file is None and growth_file is None:
     st.info(
-        '📌 왼쪽 사이드바에서 CSV 파일 2개를 업로드하세요.\n\n'
+        '📌 왼쪽 사이드바에서 CSV 파일 2개를 업로드하세요.\n'
+        '\n'
         '예시 구조:\n'
         '- 환경: time, temperature, humidity, ec, ph, water_temp, co2\n'
         '- 생육: 개체번호, 잎 수(장), 지상부 길이(mm), 지하부길이(mm), '
@@ -313,8 +312,12 @@ if env_processed is not None and env_mapped is not None:
     if env_col_pairs:
         st.caption('※ 센서 미측정 구간은 결측값(NaN)으로 표시됩니다.')
 
+        # ★ 수정: 실제 열 이름만 추출해 인덱싱 (튜플 아님)
         env_col_names = [col_name for _, col_name in env_col_pairs]
-        st.dataframe(env_processed[env_col_names].describe().T, use_container_width=True)
+        st.dataframe(
+            env_processed[env_col_names].describe().T,
+            use_container_width=True,
+        )
 
         st.subheader('환경 변수 시계열')
         fig, axes = plt.subplots(
@@ -329,7 +332,8 @@ if env_processed is not None and env_mapped is not None:
             valid = env_processed[col_name].dropna()
             if env_time_col and len(valid) > 0:
                 t_valid = env_processed.loc[valid.index, env_time_col]
-                ax.plot(t_valid, valid.values, linewidth=0.7, color='#2a7f8c')
+                ax.plot(t_valid, valid.values, linewidth=0.7,
+                        color='#2a7f8c')
             else:
                 ax.plot(valid.values, linewidth=0.7, color='#2a7f8c')
             ax.set_ylabel(label, fontsize=9)
@@ -345,17 +349,17 @@ if env_processed is not None and env_mapped is not None:
 #  SECTION 2 — 생육 결과: 개체별 비교
 # ══════════════════════════════════════════════════════
 if growth_clean is not None and growth_d is not None:
-    st.header('🌱 생육 결과 — 개체별 비교')
+    st.header(f'🌱 {school_name} 생육 결과 — 개체별 비교')
     st.caption(f'사용 중인 열: {", ".join(growth_df_raw.columns)}')
 
-    metric_map = []
+    metric_map = []  # (표시라벨, 단위, 실제열이름)
     for col_key, label, unit in [
-        ('leaf_col',        '잎 수',        '장'),
-        ('above_len_col',   '지상부 길이',  'mm'),
-        ('below_len_col',   '지하부 길이',  'mm'),
-        ('fresh_col',       '생중량',       'g'),
-        ('shoot_mass_col',  '지상부 질량',  'g'),
-        ('root_mass_col',   '지하부 질량',  'g'),
+        ('leaf_col',       '잎 수',       '장'),
+        ('above_len_col',  '지상부 길이', 'mm'),
+        ('below_len_col',  '지하부 길이', 'mm'),
+        ('fresh_col',      '생중량',      'g'),
+        ('shoot_mass_col', '지상부 질량', 'g'),
+        ('root_mass_col',  '지하부 질량', 'g'),
     ]:
         col = growth_d.get(col_key)
         if col and col in growth_clean.columns:
@@ -395,20 +399,29 @@ if growth_clean is not None and growth_d is not None:
         metric_labels = [m[0] for m in metric_map]
         selected_label = st.selectbox('비교할 지표 선택', metric_labels)
 
-        selected_col = next((m[2] for m in metric_map if m[0] == selected_label), None)
-        selected_unit = next((m[1] for m in metric_map if m[0] == selected_label), '')
+        selected_col = next(
+            (m[2] for m in metric_map if m[0] == selected_label), None
+        )
+        selected_unit = next(
+            (m[1] for m in metric_map if m[0] == selected_label), ''
+        )
 
         if selected_col:
             fig, ax = plt.subplots(figsize=(10, 4.5))
             ids = growth_clean['_id_str'].values
             vals = growth_clean[selected_col].values
             colors = plt.cm.viridis(np.linspace(0.15, 0.85, len(ids)))
-            ax.bar(ids, vals, color=colors, edgecolor='white', linewidth=0.5)
+            ax.bar(
+                ids, vals,
+                color=colors, edgecolor='white', linewidth=0.5,
+            )
             ax.set_xlabel('개체번호', fontsize=10)
             ax.set_ylabel(f'{selected_label} ({selected_unit})', fontsize=10)
             mean_val = np.nanmean(vals)
-            ax.axhline(mean_val, color='red', linestyle='--', linewidth=1.5,
-                       label=f'평균: {mean_val:.2f}')
+            ax.axhline(
+                mean_val, color='red', linestyle='--', linewidth=1.5,
+                label=f'평균: {mean_val:.2f}',
+            )
             ax.legend(fontsize=9)
             ax.grid(axis='y', alpha=0.3)
             ax.tick_params(labelsize=8)
@@ -425,7 +438,9 @@ if growth_clean is not None and growth_d is not None:
         renamed = growth_clean[display_cols].copy()
         if '_id_str' in renamed.columns:
             renamed = renamed.rename(columns={'_id_str': '개체번호'})
-        st.dataframe(renamed, use_container_width=True, hide_index=True)
+        st.dataframe(
+            renamed, use_container_width=True, hide_index=True,
+        )
 
 # ══════════════════════════════════════════════════════
 #  SECTION 3 — 상관 분석
@@ -444,12 +459,13 @@ if growth_clean is not None and growth_num_cols is not None:
 
         fig, ax = plt.subplots(figsize=(6, 5.5))
         im = ax.imshow(
-            corr_matrix.values, cmap='RdBu_r', vmin=-1, vmax=1, aspect='auto'
+            corr_matrix.values, cmap='RdBu_r',
+            vmin=-1, vmax=1, aspect='auto',
         )
         ax.set_xticks(range(len(corr_matrix.columns)))
         ax.set_yticks(range(len(corr_matrix.index)))
         ax.set_xticklabels(
-            corr_matrix.columns, rotation=45, ha='right', fontsize=8
+            corr_matrix.columns, rotation=45, ha='right', fontsize=8,
         )
         ax.set_yticklabels(corr_matrix.index, fontsize=8)
         for i in range(len(corr_matrix.index)):
@@ -505,7 +521,8 @@ if growth_clean is not None and growth_num_cols is not None:
 # ══════════════════════════════════════════════════════
 #  SECTION 4 — 환경-생육 비교 요약
 # ══════════════════════════════════════════════════════
-if env_processed is not None and growth_clean is not None and env_time_col is not None:
+if env_processed is not None and growth_clean is not None \
+   and env_time_col is not None:
     st.header('🌡️ 생육 vs 환경: 지표별 평균')
     st.caption(
         '전체 관측 기간의 환경 평균과 개체별 생육 지표 평균을 나란히 비교합니다.'
@@ -520,31 +537,37 @@ if env_processed is not None and growth_clean is not None and env_time_col is no
         ('평균 pH',   env_mapped['ph_col'],      ''),
         ('평균 CO₂',  env_mapped['co2_col'],     'ppm'),
     ]
-    env_summary = [(lbl, c, u) for lbl, c, u in env_summary if c and c in env_processed.columns]
+    env_summary = [
+        (lbl, c, u) for lbl, c, u in env_summary
+        if c and c in env_processed.columns
+    ]
 
     with col1:
-        st.markdown(f'**{school_name} 전체 기간 환경 평균**')
+        st.markdown('**전체 기간 환경 평균**')
         for lbl, col, unit in env_summary:
             m = env_processed[col].mean()
             s = env_processed[col].std(ddof=0)
             st.write(f'- **{lbl}**: {m:.2f} ± {s:.2f} {unit}')
 
     with col2:
-        st.markdown(f'**{school_name} 개체별 생육 지표 평균**')
-        for label, unit, col in metric_map if metric_map else []:
+        st.markdown('**개체별 생육 지표 평균**')
+        for _, _, col in (metric_map if metric_map else []):
             if col in growth_clean.columns:
                 m = growth_clean[col].mean()
                 s = growth_clean[col].std(ddof=0)
+                label, unit, _ = next(
+                    m for m in metric_map if m[2] == col
+                )
                 st.write(f'- **{label}**: {m:.2f} ± {s:.2f} {unit}')
 
 # ── 하단 정보 ──
 st.divider()
 st.caption(
-    f'**처리 특징**\n'
-    f'- 학교: {school_name}\n'
-    f'- 인코딩: utf-8-sig → cp949 → utf-8 자동 폴백\n'
-    f'- 열 이름: 영문·한글·단위·띄어쓰기 포함 등 여러 변형을 유연 매핑\n'
-    f'- 한글 폰트: matplotlib에서 Nanum·Apple·Malgun·Noto 계열 자동 감지\n'
-    f'- 생중량(g) 열이 없으면 지상부질량 + 지하부질량으로 자동 계산\n'
-    f'- 통계 용어 설명은 지표 표·캡션에 짧게 표시'
+    '**처리 특징 (※ 인천아라고등학교 데이터 기준 확인 완료)**\n'
+    '- 인코딩: utf-8-sig → cp949 → utf-8 자동 폴백\n'
+    '- 열 이름: 영문·한글·단위·띄어쓰기 포함 등 여러 변형을 유연 매핑\n'
+    '- 한글 폰트: matplotlib에서 Nanum·Apple·Malgun·Noto 계열 자동 감지\n'
+    '- 생중량(g) 열이 없으면 지상부질량 + 지하부질량으로 자동 계산\n'
+    '- 통계 용어 설명은 지표 표·캡션에 짧게 표시'
+)
 )
