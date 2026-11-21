@@ -3,458 +3,633 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
-import io, os, platform, subprocess, sys
+from io import BytesIO
+import re
 
-# ─────────────────────────────────────────────────────────────
-# 한글 폰트 설정 (환경에 따라 자동 탐색)
-# ─────────────────────────────────────────────────────────────
+# ============================================================
+# 한글 폰트 설정 (Streamlit Cloud에서도 깨지지 않도록)
+# ============================================================
 def setup_korean_font():
-    candidates = [
-        "NotoSansCJKkr-Regular.ttf",
-        "NotoSansKR-Regular.ttf",
-        "NanumGothic.ttf",
-        "NanumBarunGothic.ttf",
-        "AppleGothic.ttf",
-        "Seoul Hangang Pod/Regular.ttc",
-    ]
-    found = None
-    for cand in candidates:
-        for root, _, files in os.walk("/"):
-            if cand in files:
-                found = os.path.join(root, cand)
-                break
-        if found:
-            break
-    # Linux 패키지 폰트 경로도 확인
-    if not found:
-        for cand in ["/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
-                     "/usr/share/fonts/opentype/noto/NotoSansCJKkr-Regular.otf",
-                     "/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf"]:
-            if os.path.exists(cand):
-                found = cand
-                break
-    if not found:
-        try:
-            result = subprocess.run(["fc-list", ":lang=ko"], capture_output=True, text=True)
-            for line in result.stdout.splitlines():
-                if ".ttf" in line or ".otf" in line:
-                    parts = line.split(":")
-                    if len(parts) >= 1 and os.path.isfile(parts[0].strip()):
-                        found = parts[0].strip()
-                        break
-        except Exception:
-            pass
-    if found:
-        fm.fontMgr.addfont(found)
-        prop = fm.FontProperties(fname=found)
-        plt.rcParams["font.family"] = prop.get_name()
-        plt.rcParams["axes.unicode_minus"] = False
-        return prop.get_name()
-    return None
+    """Noto Sans CJK KR 폰트를 찾아 matplotlib 기본 폰트로 설정"""
+    font_paths = fm.findSystemFonts()
+    target_font = None
 
-font_name = setup_korean_font()
-if font_name:
-    st.caption(f"💬 사용 중인 한글 폰트: {font_name}")
-else:
-    st.warning("⚠ 한글 폰트를 찾지 못했습니다. 그래프 라벨이 깨질 수 있습니다.")
+    # Noto Sans CJK KR 우선, 없으면 다른 CJK 폰트
+    for fp in font_paths:
+        if "NotoSansCJK" in fp and "Regular" in fp:
+            try:
+                prop = fm.FontProperties(fname=fp)
+                if "KR" in fp or "Korean" in fp or "CJK" in fp:
+                    target_font = prop
+                    break
+            except:
+                continue
 
-# ─────────────────────────────────────────────────────────────
-# 통계 용어 짧은 설명 (고등학생용)
-# ─────────────────────────────────────────────────────────────
-STAT_HINTS = {
-    "평균 (mean)": "모든 값을 더해 개수로 나눈 '대표값'입니다.",
-    "표준편차 (std)": "값이 평균 주변에 얼마나 퍼져 있는지를 나타냅니다. 클수록 개체 간 차이가 큼.",
-    "상관계수 (r)": "두 변수가 함께 움직이는 정도를 −1 ~ +1로 나타냅니다. +1에 가까울수록 함께 증가.",
-    "중앙값 (median)": "값을 크기순으로 늘어놓았을 때 정확히 중간에 있는 값.",
-    "최대/최소": "데이터 중 가장 큰 값과 가장 작은 값.",
-    "개체 수 (N)": "측정한 개체(식물)의 총 개수.",
+    if target_font is None:
+        # 두 번째 시도: 모든 CJK 폰트
+        for fp in font_paths:
+            if "CJK" in fp:
+                try:
+                    target_font = fm.FontProperties(fname=fp)
+                    break
+                except:
+                    continue
+
+    if target_font is not None:
+        plt.rcParams["font.family"] = target_font.get_name()
+        plt.rcParams["axes.unicode_minus"] = False  # 마이너스 기호 깨짐 방지
+        return True
+    return False
+
+font_setup_ok = setup_korean_font()
+
+# ============================================================
+# 열 이름 매핑 (학교마다 다른 열 이름 대응)
+# ============================================================
+
+# 환경 데이터 열 매핑: 다양한 형식 → 표준 이름
+ENV_COLUMN_MAPPINGS = {
+    "time": ["time", "categories", "날짜", "일시", "time stamp", "timestamp"],
+    "temperature": ["temperature", "온도", "temp", "기온", "Temperature", "TEMP"],
+    "humidity": ["humidity", "습도", "hum", "Humidity", "HUM"],
+    "ec": ["ec", "EC", "전기전도도", "EC(ms/cm)", "ec_ms_cm"],
+    "ph": ["ph", "PH", "수소이온농도", "pH"],
+    "water_temp": ["water_temp", "수온", "water temperature", "WT", "water_temp_c"],
+    "co2": ["co2", "CO2", "이산화탄소", "co2_ppm"],
+    "비고": ["비고", "note", "memo", "remarks", "참고"],
 }
 
-# ─────────────────────────────────────────────────────────────
-# 사이드바: 데이터 업로드
-# ─────────────────────────────────────────────────────────────
-st.set_page_config(page_title="극지식물 생육 대시보드", layout="wide")
-st.title("🌱 극지식물 개체별 생육 차이 분석 대시보드")
-st.markdown("*인천아라고등학교 극지식물 프로젝트 — 업로드한 CSV를 바로 시각화*")
-
-st.sidebar.header("📂 데이터 업로드")
-env_file  = st.sidebar.file_uploader("환경 데이터 (CSV)", type=["csv"])
-grow_file = st.sidebar.file_uploader("생육 결과 데이터 (CSV)", type=["csv"])
-
-# ─────────────────────────────────────────────────────────────
-# 인코딩 자동 감지 + 읽기
-# ─────────────────────────────────────────────────────────────
-def read_csv_auto(file):
-    if file is None:
-        return None
-    raw = file.read()
-    file.seek(0)
-    # BOM 확인 → utf-8-sig
-    if raw[:3] == b"\xef\xbb\xbf":
-        return pd.read_csv(io.BytesIO(raw), encoding="utf-8-sig")
-    # cp949 시도
-    try:
-        return pd.read_csv(io.BytesIO(raw), encoding="cp949")
-    except UnicodeDecodeError:
-        pass
-    # utf-8 시도
-    try:
-        return pd.read_csv(io.BytesIO(raw), encoding="utf-8")
-    except UnicodeDecodeError:
-        pass
-    # 전부 실패하면 latin-1로 읽고 컬럼명은 유지
-    return pd.read_csv(io.BytesIO(raw), encoding="latin-1")
-
-env_df  = read_csv_auto(env_file)
-grow_df = read_csv_auto(grow_file)
-
-# ─────────────────────────────────────────────────────────────
-# 열 이름 표준화 (학교마다 다른 이름 → 내부 맵핑)
-# ─────────────────────────────────────────────────────────────
-ENV_COL_MAP = {          # 여러 가능한 이름 → 내부 표준 키
-    "time":       ["time", "Time", "일시", "날짜", "date", "datetime", "timestamp"],
-    "temperature":["temperature", "temp", "기온", "온도", "temperature(°C)", "temperature_c"],
-    "humidity":   ["humidity", "hum", "습도", "humidity(%)", "humidity_percent"],
-    "ec":         ["ec", "EC", "EC(mS/cm)", "ec_ms_cm", "전기전도도"],
-    "ph":         ["ph", "pH", "pH값", "ph_value", "수소이온농도"],
-    "water_temp": ["water_temp", "watertemperature", "수온", "water_temp(°C)"],
-    "co2":        ["co2", "CO2", "co2(ppm)", "co2_ppm", "이산화탄소"],
+# 생육 데이터 열 매핑
+GROWTH_COLUMN_MAPPINGS = {
+    "개체번호": ["개체번호", "개체 번호", "번호", "id", "plant_id", "개체 id", "ID"],
+    "잎 수": ["잎 수(장)", "잎수", "잎 수", "leaf_count", "leaves", "엽수", "잎 개수"],
+    "지상부 길이": ["지상부 길이(mm)", "지상부길이(mm)", "지상부 길이", "지상부길이", "shoot_length", "shoot_len"],
+    "지하부 길이": ["지하부 길이(mm)", "지하부길이(mm)", "지하부 길이", "지하부길이", "root_length", "root_len"],
+    "생중량": ["생중량(g)", "생중량", "생 중량", "fresh_weight", "생체중량", "fw"],
+    "지상부질량": ["지상부질량(g)", "지상부 질량(g)", "지상부질량", "shoot_mass", "shoot_weight", "지상부 무게"],
+    "지하부질량": ["지하부질량(g)", "지하부 질량(g)", "지하부질량", "root_mass", "root_weight", "지하부 무게"],
 }
 
-GROW_COL_MAP = {
-    "개체번호":  ["개체번호", "개체", "id", "ID", "plant_id", "번호"],
-    "잎 수(장)":["잎 수(장)", "잎수", "leaf_count", "잎 수", "leaf"],
-    "지상부 길이(mm)":["지상부 길이(mm)", "지상부길이", "shoot_length", "지상부 길이", "shoot_len"],
-    "지하부길이(mm)":["지하부길이(mm)", "지하부 길이(mm)", "지하부길이", "root_length", "지하부 길이"],
-    "생중량(g)":["생중량(g)", "생중량", "fresh_weight", "생 무게", "fw"],
-    "지상부질량(g)":["지상부질량(g)", "지상부 질량(g)", "지상부질량", "shoot_mass", "지상부 질량"],
-    "지하부질량(g)":["지하부질량(g)", "지하부 질량(g)", "지하부질량", "root_mass", "지하부 질량"],
-}
+def normalize_environmental_columns(df):
+    """환경 데이터 열 이름을 표준화하여 반환"""
+    renamed = {}
+    found_columns = {}
 
-def map_columns(df, col_map):
-    if df is None:
-        return None
-    cols = list(df.columns)
-    new_cols = {}
-    for std_key, aliases in col_map.items():
+    for standard_name, aliases in ENV_COLUMN_MAPPINGS.items():
+        actual_col = None
         for alias in aliases:
-            if alias in cols:
-                new_cols[alias] = std_key
+            for col in df.columns:
+                if col.lower().strip() == alias.lower().strip():
+                    actual_col = col
+                    break
+            if actual_col:
                 break
-    renamed = df.rename(columns=new_cols)
-    # 매핑되지 않은 열은 원래 이름 유지
-    return renamed, new_cols
+        if actual_col and actual_col not in renamed:
+            renamed[actual_col] = standard_name
+            found_columns[standard_name] = actual_col
 
-env_mapped  = None
-env_rename  = {}
-grow_mapped = None
-grow_rename = {}
+    df_renamed = df.rename(columns=renamed)
+    return df_renamed, found_columns
 
-if env_df is not None:
-    env_mapped, env_rename = map_columns(env_df, ENV_COL_MAP)
-if grow_df is not None:
-    grow_mapped, grow_rename = map_columns(grow_df, GROW_COL_MAP)
+def normalize_growth_columns(df):
+    """생육 데이터 열 이름을 표준화하여 반환"""
+    renamed = {}
 
-# ─────────────────────────────────────────────────────────────
-# 데이터 미리보기
-# ─────────────────────────────────────────────────────────────
-st.sidebar.subheader("📋 업로드된 파일 미리보기")
+    for standard_name, aliases in GROWTH_COLUMN_MAPPINGS.items():
+        actual_col = None
+        for alias in aliases:
+            for col in df.columns:
+                if col.lower().strip() == alias.lower().strip():
+                    actual_col = col
+                    break
+            if actual_col:
+                break
+        if actual_col and actual_col not in renamed:
+            renamed[actual_col] = standard_name
 
-if env_mapped is not None:
-    st.sidebar.markdown(f"**환경 데이터** — {env_mapped.shape[0]}행 × {env_mapped.shape[1]}열")
-    st.sidebar.dataframe(env_mapped.head(3), use_container_width=True)
-    env_cols = list(env_mapped.columns)
-    st.sidebar.caption(f"실제 열: {env_cols}")
-else:
-    st.sidebar.info("환경 CSV를 업로드하세요.")
+    df_renamed = df.rename(columns=renamed)
+    return df_renamed, list(renamed.keys())
 
-if grow_mapped is not None:
-    st.sidebar.markdown(f"**생육 결과 데이터** — {grow_mapped.shape[0]}행 × {grow_mapped.shape[1]}열")
-    st.sidebar.dataframe(grow_mapped.head(3), use_container_width=True)
-    grow_cols = list(grow_mapped.columns)
-    st.sidebar.caption(f"실제 열: {grow_cols}")
-else:
-    st.sidebar.info("생육 결과 CSV를 업로드하세요.")
+# ============================================================
+# 인코딩 자동 감지
+# ============================================================
+def detect_encoding(file_bytes):
+    """파일 인코딩을 감지하여 적절한 디코딩 시도"""
+    encodings = ["utf-8-sig", "utf-8", "cp949", "euc-kr", "iso-8859-1"]
 
-# ─────────────────────────────────────────────────────────────
-# 환경 데이터 시간 파싱 (포맷 다양함)
-# ─────────────────────────────────────────────────────────────
-def parse_datetime_col(series):
-    if series is None or len(series) == 0:
-        return pd.Series(dtype="datetime64[ns]")
-    s = series.astype(str).str.strip()
-    # 포맷 A: '20260715_0' (날짜_시각번호)
-    parsed = pd.to_datetime(s, format="%Y%m%d_%H", errors="coerce")
-    if parsed.isna().all():
-        # 포맷 B: '2026-07-15 06:00:00'
-        parsed = pd.to_datetime(s, errors="coerce")
-    if parsed.isna().all():
-        # 기타 일반 형식
-        parsed = pd.to_datetime(s, infer_datetime_format=True, errors="coerce")
-    return parsed
+    for enc in encodings:
+        try:
+            decoded = file_bytes.decode(enc)
+            # 한글 문자가 정상적으로 디코딩되었는지 확인
+            if any(0xac00 <= ord(c) <= 0xd7af for c in decoded[:1000]):
+                return enc
+            # UTF-8 BOM 확인
+            if decoded.startswith("\ufeff"):
+                return "utf-8-sig"
+        except (UnicodeDecodeError, UnicodeError):
+            continue
 
-env_time_col = None
-if env_mapped is not None and "time" in env_mapped.columns:
-    env_time_col = parse_datetime_col(env_mapped["time"])
-    env_mapped = env_mapped.assign(_dt=env_time_col)
+    return "utf-8-sig"
 
-# ─────────────────────────────────────────────────────────────
-# 생육 데이터 분석 (통계)
-# ─────────────────────────────────────────────────────────────
-grow_stats = None
-if grow_mapped is not None and "개체번호" in grow_mapped.columns:
-    num_cols = ["잎 수(장)", "지상부 길이(mm)", "지하부길이(mm)",
-                "생중량(g)", "지상부질량(g)", "지하부질량(g)"]
-    present = [c for c in num_cols if c in grow_mapped.columns]
-    grow_stats = grow_mapped[present].describe().T
-    # 표준편차 추가
-    if "std" not in grow_stats.columns:
-        grow_stats["std"] = grow_mapped[present].std()
-    grow_stats = grow_stats[["count", "mean", "std", "min", "25%", "50%", "75%", "max"]].round(2)
-    # 컬럼명 한국어화
-    grow_stats.columns = ["개체 수(N)", "평균", "표준편차", "최소", "제1사분위(Q1)", "중앙값", "제3사분위(Q3)", "최대"]
+def load_csv_safe(file):
+    """CSV 파일을 안전하게 로드 (인코딩 자동 감지 + 다양한 열 이름 처리)"""
+    file_bytes = file.read()
+    file.seek(0)
 
-# ─────────────────────────────────────────────────────────────
-# 메인 화면
-# ─────────────────────────────────────────────────────────────
-if env_mapped is None and grow_mapped is None:
-    st.info("📁 사이드바에서 환경 데이터와 생육 결과 CSV를 각각 업로드해주세요.")
+    encoding = detect_encoding(file_bytes)
+
+    try:
+        df = pd.read_csv(BytesIO(file_bytes), encoding=encoding)
+    except UnicodeDecodeError:
+        try:
+            df = pd.read_csv(BytesIO(file_bytes), encoding="utf-8-sig")
+        except:
+            df = pd.read_csv(BytesIO(file_bytes), encoding="cp949")
+
+    df = df.replace("", np.nan)
+    return df, encoding
+
+# ============================================================
+# 시간 데이터 파싱
+# ============================================================
+def parse_time_column(df, time_col_name):
+    """시간 열 값을 datetime으로 변환 (다양한 형식 지원)"""
+    if time_col_name is None or time_col_name not in df.columns:
+        return df
+
+    series = df[time_col_name].astype(str)
+
+    # 형식 1: YYYY-MM-DD HH:MM:SS
+    try:
+        df["datetime"] = pd.to_datetime(series, format="%Y-%m-%d %H:%M:%S")
+        return df
+    except:
+        pass
+
+    # 형식 2: YYYYMMDD_N (날짜_시각 인덱스)
+    pattern = r"^(\d{8})_(\d+)$"
+    matched = series.str.match(pattern)
+    if matched.any():
+        def parse_date_time(val):
+            match = re.match(pattern, str(val))
+            if match:
+                date_str, time_idx = match.groups()
+                year = int(date_str[:4])
+                month = int(date_str[4:6])
+                day = int(date_str[6:8])
+                idx = int(time_idx)
+                hour = idx // 60
+                minute = idx % 60
+                return pd.Timestamp(year=year, month=month, day=day, 
+                                   hour=hour, minute=minute)
+            return pd.NaT
+
+        df["datetime"] = series.apply(parse_date_time)
+        return df
+
+    # 형식 3: 기타 날짜 형식
+    try:
+        df["datetime"] = pd.to_datetime(series, errors="coerce")
+    except:
+        df["datetime"] = pd.NaT
+
+    return df
+
+# ============================================================
+# 통계 설명 (고등학생용)
+# ============================================================
+STAT_EXPLANATIONS = {
+    "평균": "평균(mean): 모든 값을 더해 개수로 나눈 값. 데이터의 대표값을 나타냅니다.",
+    "표준편차": "표준편차(std): 데이터가 평균에서 얼마나 흩어져 있는지 나타내는 값. 클수록 데이터가 넓게 퍼져 있습니다.",
+    "분산": "분산(variance): 표준편차를 제곱한 값. 데이터가 평균에서 떨어진 거리의 제곱 평균.",
+    "상관관계": "상관관계(correlation): 두 변수가 함께 움직이는 정도. +1에 가까우면 같이 증가, -1에 가까우면 반대 방향, 0에 가까우면 관계 없음.",
+    "중앙값": "중앙값(median): 데이터를 크기순으로 정렬했을 때 정가운데 있는 값. 극단값의 영향을 덜 받습니다.",
+    "최솟값": "최솟값(min): 데이터 중 가장 작은 값.",
+    "최댓값": "최댓값(max): 데이터 중 가장 큰 값.",
+}
+
+# ============================================================
+# Streamlit 앱
+# ============================================================
+st.set_page_config(
+    page_title="극지식물 생육 분석 대시보드",
+    page_icon="\U0001f331",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+st.title("\U0001f331 극지식물 생육 차이 분석 대시보드")
+st.caption("인천아라고등학교 극지식물 프로젝트 - 환경 데이터와 개체별 생육 결과 통합 분석")
+
+# 사이드바 - 데이터 업로드
+st.sidebar.header("\U0001f4c1 데이터 업로드")
+st.sidebar.info("""
+**사용 방법**
+1. 환경 데이터 CSV와 생육 결과 데이터 CSV를 각각 업로드
+2. 인코딩(utf-8-sig/cp949)과 열 이름이 달라도 자동 처리
+3. 한글 폰트 깨짐 없이 Streamlit Cloud에서도 실행
+""")
+
+env_file = st.sidebar.file_uploader("환경 데이터 CSV", type=["csv"])
+growth_file = st.sidebar.file_uploader("생육 결과 데이터 CSV", type=["csv"])
+
+# 예시 데이터 안내
+st.sidebar.divider()
+st.sidebar.subheader("\U0001f4cb 열 이름 예시")
+st.sidebar.code("""
+# 환경 데이터 (형식 A - 우리 학교)
+time, temperature, humidity, ec, ph, water_temp, co2
+2026-07-13 17:00:00, 21.9, 53.7, 0.84, 7.05, 23.3, 1186
+
+# 환경 데이터 (형식 B - 다른 학교 가능)
+categories, 온도, 습도, EC, PH
+
+# 생육 데이터
+개체번호, 잎 수(장), 지상부 길이(mm), 지하부길이(mm), 생중량(g), 지상부질량(g), 지하부질량(g)
+1, 61, 48, 170, 11.31, 7.31, 4.00
+""", language="python")
+
+if env_file is None and growth_file is None:
+    st.warning("\U0001f4d0 왼쪽 사이드바에서 CSV 파일을 업로드해주세요.")
     st.stop()
 
-tab1, tab2, tab3, tab4 = st.tabs([
-    "🌡 환경 데이터 요약",
-    "📊 생육 결과 통계",
-    "🔗 상관 분석",
-    "📈 시계열 보기",
-])
+# ============================================================
+# 데이터 로드 및 처리
+# ============================================================
+env_df = None
+growth_df = None
+env_encoding = None
+growth_encoding = None
 
-# ──────────────────────── Tab 1: 환경 데이터 요약 ────────────────────────
-with tab1:
-    st.header("🌡 환경 데이터 요약")
-    if env_mapped is None:
-        st.warning("환경 데이터가 없습니다.")
-    else:
-        env_present = [k for k in ENV_COL_MAP
-                       if any(a in env_mapped.columns for a in ENV_COL_MAP[k])]
-        if env_time_col is not None and not env_time_col.isna().all():
-            first_ts = env_time_col.min()
-            last_ts  = env_time_col.max()
-            st.markdown(f"- **측정 기간**: {first_ts.strftime('%Y-%m-%d %H:%M')} ~ {last_ts.strftime('%Y-%m-%d %H:%M')}")
-            st.markdown(f"- **총 측정 횟수**: {len(env_time_col)}회")
-            st.markdown(f"- **시간당 평균 측정 간격**: 약 {round(len(env_time_col) / max(1,(last_ts-first_ts).total_seconds()/3600),1)}회/시간")
+if env_file is not None:
+    with st.spinner("환경 데이터 로딩 중..."):
+        env_df, env_encoding = load_csv_safe(env_file)
+        env_df, env_found = normalize_environmental_columns(env_df)
 
-        metric_cols = st.columns(4)
-        for i, key in enumerate(["temperature", "humidity", "ec", "ph"]):
-            real = [a for a in ENV_COL_MAP[key] if a in env_mapped.columns]
-            if real:
-                col = env_mapped[real[0]]
-                valid = pd.to_numeric(col, errors="coerce").dropna()
-                if len(valid) > 0:
-                    with metric_cols[i % 4]:
-                        st.metric(
-                            label=f"{key.upper()}  _({STAT_HINTS.get('평균 (mean)','')})" if i==0 else key.upper(),
-                            value=round(valid.mean(), 2),
-                            delta=None,
-                        )
-                        st.caption(STAT_HINTS.get("평균 (mean)", ""))
+        time_col = env_found.get("time")
+        if time_col:
+            env_df = parse_time_column(env_df, time_col)
 
-        st.subheader("📉 환경 변수 분포 (히스토그램)")
-        env_plot_cols = [k for k in ["temperature","humidity","ec","ph","water_temp","co2"]
-                         if any(a in env_mapped.columns for a in ENV_COL_MAP[k])]
-        if env_plot_cols:
-            fig, axes = plt.subplots(2, 3, figsize=(14, 6))
-            axes = axes.flatten()
-            for j, key in enumerate(env_plot_cols):
-                real = [a for a in ENV_COL_MAP[key] if a in env_mapped.columns][0]
-                vals = pd.to_numeric(env_mapped[real], errors="coerce").dropna()
-                axes[j].hist(vals, bins=30, color="#4C72B0", alpha=0.7, edgecolor="white")
-                axes[j].set_title(f"{key} 분포  (n={len(vals)})")
-                axes[j].set_xlabel(key)
-                axes[j].set_ylabel("빈도")
-                axes[j].axvline(vals.mean(), color="red", linestyle="--",
-                                label=f"평균={vals.mean():.2f}")
-                axes[j].legend(fontsize=8)
-            for ax in axes[len(env_plot_cols):]:
-                ax.axis("off")
-            plt.tight_layout()
-            st.pyplot(fig)
-            plt.close(fig)
+        st.success(f"\u2705 환경 데이터 로드 완료 (인코딩: {env_encoding})")
+        st.info(f"감지된 환경 열: {list(env_found.keys())}")
+
+if growth_file is not None:
+    with st.spinner("생육 결과 데이터 로딩 중..."):
+        growth_df, growth_encoding = load_csv_safe(growth_file)
+        growth_df, growth_original = normalize_growth_columns(growth_df)
+
+        st.success(f"\u2705 생육 데이터 로드 완료 (인코딩: {growth_encoding})")
+        st.info(f"감지된 생육 열: {list(growth_df.columns)}")
+
+# ============================================================
+# 데이터 미리보기
+# ============================================================
+if env_df is not None:
+    st.subheader("\U0001f321\u200d\u25b3 환경 데이터")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("총 측정 횟수", f"{len(env_df):,}회")
+    with col2:
+        if "datetime" in env_df.columns:
+            time_range = f"{env_df['datetime'].min()} ~ {env_df['datetime'].max()}"
+            st.metric("측정 기간", time_range)
+
+    st.caption("* 학교마다 열 이름이 달라도 자동으로 표준화하여 처리합니다.")
+    st.dataframe(env_df, use_container_width=True, height=300)
+
+    missing = env_df.isnull().sum()
+    if missing.any():
+        st.warning(f"* 일부 환경 측정값에 결측이 있습니다: {dict(missing[missing > 0])}")
+
+if growth_df is not None:
+    st.subheader("\U0001f33f 개체별 생육 결과 데이터")
+    st.metric("총 개체 수", f"{len(growth_df):,}개체")
+    st.dataframe(growth_df, use_container_width=True, height=300)
+
+# ============================================================
+# 분석 탭
+# ============================================================
+if env_df is not None or growth_df is not None:
+    st.divider()
+    st.subheader("\U0001f4ca 분석 결과")
+
+    tab1, tab2, tab3 = st.tabs(["\U0001f321\u200d\u25b3 환경 데이터 분석", "\U0001f33f 생육 데이터 분석", "\U0001f517 환경-생육 상관관계"])
+
+    with tab1:
+        if env_df is None:
+            st.warning("환경 데이터를 업로드해주세요.")
         else:
-            st.info("환경 데이터에서 수치형 열을 찾지 못했습니다.")
+            env_vars = [col for col in ["temperature", "humidity", "ec", "ph", "water_temp", "co2"] 
+                       if col in env_df.columns]
 
-        st.subheader("📋 환경 데이터 전체 보기")
-        st.dataframe(env_mapped, use_container_width=True, height=300)
+            if env_vars:
+                st.subheader("\U0001f4c8 환경 변수별 기초 통계")
+                st.caption("각 통계값의 의미: 아래 버튼을 눌러 확인하세요.")
 
-# ──────────────────────── Tab 2: 생육 결과 통계 ────────────────────────
-with tab2:
-    st.header("📊 생육 결과 통계")
-    if grow_mapped is None:
-        st.warning("생육 결과 데이터가 없습니다.")
-    else:
-        st.markdown("아래 표는 각 생육 지표별로 **개체들의 통계 요약**입니다.")
-        if grow_stats is not None:
-            st.dataframe(grow_stats, use_container_width=True, height=260)
-            st.caption("※ 평균 = 대표값 / 표준편차 = 개체 간 차이 정도 / 중앙값 = 중간값")
+                stats_rows = []
+                for var in env_vars:
+                    data = env_df[var].dropna()
+                    stats_rows.append({
+                        "변수": var,
+                        "평균": round(data.mean(), 2),
+                        "표준편차": round(data.std(), 2),
+                        "중앙값": round(data.median(), 2),
+                        "최솟값": round(data.min(), 2),
+                        "최댓값": round(data.max(), 2),
+                        "측정 개수": len(data)
+                    })
+                stats_df = pd.DataFrame(stats_rows)
+                st.dataframe(stats_df, use_container_width=True)
 
-        st.subheader("🌿 개체별 생육 지표 (막대 그래프)")
-        grow_num = [c for c in ["잎 수(장)","지상부 길이(mm)","지하부길이(mm)",
-                                 "생중량(g)","지상부질량(g)","지하부질량(g)"]
-                     if c in grow_mapped.columns]
-        if grow_num:
-            for col_name in grow_num:
-                vals = pd.to_numeric(grow_mapped[col_name], errors="coerce").dropna()
-                if len(vals) == 0:
-                    continue
-                st.markdown(f"### {col_name}")
-                st.caption(STAT_HINTS.get("평균 (mean)", "") +
-                           "  ·  " + STAT_HINTS.get("표준편차 (std)", ""))
-                fig, ax = plt.subplots(figsize=(12, 3.5))
-                ids = grow_mapped["개체번호"].astype(str).tolist()[:len(vals)]
-                bars = ax.bar(ids, vals.values, color="#54A24B", alpha=0.8,
-                              edgecolor="white", linewidth=0.5)
-                ax.axhline(vals.mean(), color="red", linestyle="--",
-                           label=f"평균 = {vals.mean():.2f}")
-                ax.axhline(vals.median(), color="orange", linestyle=":",
-                           label=f"중앙값 = {vals.median():.2f}")
-                ax.set_xlabel("개체번호")
-                ax.set_ylabel(col_name)
-                ax.set_title(f"{col_name} — 개체별 분포  (n={len(vals)})")
-                ax.legend(fontsize=9)
-                ax.tick_params(axis="x", rotation=45, labelsize=8)
+                with st.expander("\U0001f4d6 통계 용어 설명 (고등학생용)"):
+                    for term, explanation in STAT_EXPLANATIONS.items():
+                        st.write(f"**{term}**: {explanation}")
+
+                st.subheader("\U0001f4c9 시간에 따른 환경 변화")
+
+                chart_cols = st.multiselect(
+                    "차트에 표시할 환경 변수 선택",
+                    env_vars,
+                    default=env_vars[:2] if len(env_vars) >= 2 else env_vars
+                )
+
+                if chart_cols and "datetime" in env_df.columns:
+                    fig, ax = plt.subplots(figsize=(12, 4))
+                    for col in chart_cols:
+                        ax.plot(env_df["datetime"], env_df[col], label=col, alpha=0.8, linewidth=1)
+                    ax.set_xlabel("시간")
+                    ax.set_ylabel("값")
+                    ax.set_title("시간에 따른 환경 변수 변화")
+                    ax.legend(loc="best")
+                    ax.grid(True, alpha=0.3)
+                    plt.xticks(rotation=45)
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    plt.close()
+                elif chart_cols:
+                    st.warning("시간 정보가 없어 시계열 차트를 그릴 수 없습니다.")
+
+                st.subheader("\U0001f4ca 환경 변수 분포")
+                dist_var = st.selectbox("분포를 볼 변수 선택", env_vars)
+
+                fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+                data = env_df[dist_var].dropna()
+                axes[0].hist(data, bins=30, color="steelblue", edgecolor="white", alpha=0.8)
+                axes[0].axvline(data.mean(), color="red", linestyle="--", label=f"평균: {data.mean():.2f}")
+                axes[0].axvline(data.median(), color="green", linestyle="--", label=f"중앙값: {data.median():.2f}")
+                axes[0].set_xlabel(dist_var)
+                axes[0].set_ylabel("빈도")
+                axes[0].set_title(f"{dist_var} 분포")
+                axes[0].legend()
+                axes[0].grid(True, alpha=0.3)
+
+                bp = axes[1].boxplot([data], labels=[dist_var], patch_artist=True)
+                bp["boxes"][0].set_facecolor("lightblue")
+                axes[1].set_ylabel(dist_var)
+                axes[1].set_title(f"{dist_var} 박스 플롯")
+                axes[1].grid(True, alpha=0.3, axis="y")
+
                 plt.tight_layout()
                 st.pyplot(fig)
-                plt.close(fig)
+                plt.close()
+            else:
+                st.warning("환경 데이터에 분석할 변수가 없습니다.")
 
-        st.subheader("📋 생육 결과 전체 데이터")
-        st.dataframe(grow_mapped, use_container_width=True, height=300)
-
-# ──────────────────────── Tab 3: 상관 분석 ────────────────────────
-with tab3:
-    st.header("🔗 상관 분석")
-    st.markdown(
-        "**[상관계수 (r)](https://ko.wikipedia.org/wiki/상관계수)** 는 "
-        "두 변수가 함께 움직이는 정도를 −1에서 +1 사이의 값으로 나타냅니다. "
-        "+1에 가까울수록 함께 증가, −1에 가까울수록 하나는 증가, 다른 하나는 감소합니다."
-    )
-    if grow_mapped is None:
-        st.warning("생육 결과 데이터가 없습니다.")
-    else:
-        grow_num = [c for c in ["잎 수(장)","지상부 길이(mm)","지하부길이(mm)",
-                                 "생중량(g)","지상부질량(g)","지하부질량(g)"]
-                     if c in grow_mapped.columns]
-        if len(grow_num) >= 2:
-            corr = grow_mapped[grow_num].corr(numeric_only=True).round(3)
-
-            # 히트맵
-            fig, ax = plt.subplots(figsize=(7, 5))
-            im = ax.imshow(corr.values, cmap="RdYlBu_r", vmin=-1, vmax=1, aspect="auto")
-            ax.set_xticks(range(len(corr.columns)))
-            ax.set_yticks(range(len(corr.index)))
-            ax.set_xticklabels(corr.columns, rotation=45, ha="right", fontsize=9)
-            ax.set_yticklabels(corr.index, fontsize=9)
-            for i in range(len(corr.index)):
-                for j in range(len(corr.columns)):
-                    val = corr.iloc[i, j]
-                    ax.text(j, i, f"{val:.2f}", ha="center", va="center",
-                            color="white" if abs(val) > 0.5 else "black", fontsize=9)
-            fig.colorbar(im, ax=ax, label="상관계수 (r)")
-            ax.set_title("생육 지표 간 상관계수 히트맵")
-            plt.tight_layout()
-            st.pyplot(fig)
-            plt.close(fig)
-
-            st.subheader("📋 상관계수 표")
-            st.dataframe(corr, use_container_width=True, height=220)
-            st.caption("※ 대각선(자기 자신)은 1.000입니다. "
-                       "예: 생중량(g) ↔ 지상부질량(g) r=0.98 → 매우 강한 양의 상관")
-
-            # 환경-생육 간 상관 (환경이 있을 때만)
-            if env_mapped is not None:
-                env_num = [k for k in ["temperature","humidity","ec","ph","water_temp","co2"]
-                           if any(a in env_mapped.columns for a in ENV_COL_MAP[k])]
-                if env_num and grow_num:
-                    st.subheader("🌡 환경 × 생육 상관")
-                    st.markdown(
-                        "환경 데이터의 각 시점 평균을 구한 뒤 생육 지표와 상관관계를 봅니다. "
-                        "환경 측정이 생육 결과 수확 시점과 정확히 일치하지 않을 수 있어 "
-                        "참고값으로 활용하세요."
-                    )
-                    env_vals = {}
-                    for key in env_num:
-                        real = [a for a in ENV_COL_MAP[key] if a in env_mapped.columns][0]
-                        env_vals[key] = pd.to_numeric(env_mapped[real], errors="coerce")
-                    env_means = pd.DataFrame(env_vals).mean()
-                    env_df_corr = pd.DataFrame({"환경_평균": env_means})
-                    # 환경 평균과 생육 평균 간 상관계수
-                    combined = env_df_corr.copy()
-                    for col_name in grow_num:
-                        combined[col_name] = grow_mapped[col_name].mean()
-                    if len(combined) > 1:
-                        corr2 = combined.T.corr().round(2)
-                        fig2, ax2 = plt.subplots(figsize=(6, 3.5))
-                        im2 = ax2.imshow(corr2.values, cmap="RdYlBu_r", vmin=-1, vmax=1)
-                        ax2.set_xticks(range(len(corr2.columns)))
-                        ax2.set_yticks(range(len(corr2.index)))
-                        ax2.set_xticklabels(corr2.columns, fontsize=9)
-                        ax2.set_yticklabels(corr2.index, fontsize=9)
-                        for i in range(len(corr2.index)):
-                            for j in range(len(corr2.columns)):
-                                v = corr2.iloc[i, j]
-                                ax2.text(j, i, f"{v:.2f}", ha="center", va="center",
-                                         color="white" if abs(v) > 0.5 else "black", fontsize=8)
-                        fig2.colorbar(im2, ax=ax2, label="r")
-                        ax2.set_title("환경 평균 vs 생육 평균 (개체 평균 기준)")
-                        plt.tight_layout()
-                        st.pyplot(fig2)
-                        plt.close(fig2)
+    with tab2:
+        if growth_df is None:
+            st.warning("생육 데이터를 업로드해주세요.")
         else:
-            st.info("비교할 생육 지표가 2개 이상 필요합니다.")
+            growth_vars = [col for col in ["잎 수", "지상부 길이", "지하부 길이", "생중량", "지상부질량", "지하부질량"] 
+                          if col in growth_df.columns]
 
-# ──────────────────────── Tab 4: 시계열 보기 ────────────────────────
-with tab4:
-    st.header("📈 환경 시계열 보기")
-    if env_mapped is None or env_time_col is None or env_time_col.isna().all():
-        st.warning("시간 축이 있는 환경 데이터가 필요합니다.")
-    else:
-        env_plot_keys = [k for k in ["temperature","humidity","ec","ph","water_temp","co2"]
-                         if any(a in env_mapped.columns for a in ENV_COL_MAP[k])]
-        if not env_plot_keys:
-            st.info("시계열로 볼 환경 수치형 열이 없습니다.")
-        else:
-            sel = st.multiselect("표시할 환경 변수 선택",
-                                 env_plot_keys, default=env_plot_keys[:2])
-            if sel:
-                fig, ax = plt.subplots(figsize=(14, 4))
-                colors = ["#E45756", "#54A24B", "#4C72B0", "#8C8C8C", "#CCB974", "#6699CC"]
-                for i, key in enumerate(sel):
-                    real = [a for a in ENV_COL_MAP[key] if a in env_mapped.columns][0]
-                    vals = pd.to_numeric(env_mapped[real], errors="coerce")
-                    mask = env_time_col.notna() & vals.notna()
-                    ax.plot(env_time_col[mask], vals[mask], color=colors[i % len(colors)],
-                            label=key, linewidth=1)
-                ax.set_xlabel("시간")
-                ax.set_ylabel("측정값")
-                ax.set_title("환경 변수 시계열")
-                ax.legend(fontsize=9, ncol=3)
-                ax.tick_params(axis="x", rotation=30)
+            if growth_vars:
+                st.subheader("\U0001f4c8 개체별 생육 통계")
+
+                g_stats_rows = []
+                for var in growth_vars:
+                    data = growth_df[var].dropna()
+                    g_stats_rows.append({
+                        "변수": var,
+                        "평균": round(data.mean(), 2),
+                        "표준편차": round(data.std(), 2),
+                        "중앙값": round(data.median(), 2),
+                        "최솟값": round(data.min(), 2),
+                        "최댓값": round(data.max(), 2),
+                    })
+                g_stats_df = pd.DataFrame(g_stats_rows)
+                st.dataframe(g_stats_df, use_container_width=True)
+
+                with st.expander("\U0001f4d6 통계 용어 설명 (고등학생용)"):
+                    for term, explanation in STAT_EXPLANATIONS.items():
+                        st.write(f"**{term}**: {explanation}")
+
+                st.subheader("\U0001f4ca 개체별 생육 비교")
+
+                x_var = st.selectbox("X축: 비교 기준", growth_vars, index=0)
+                y_var = st.selectbox("Y축: 비교 대상", growth_vars, index=1 if len(growth_vars) > 1 else 0)
+
+                fig, ax = plt.subplots(figsize=(10, 5))
+                for var in growth_vars:
+                    if var == x_var:
+                        continue
+                    ax.plot(growth_df["개체번호"], growth_df[var], marker="o", label=var, alpha=0.8)
+                ax.set_xlabel("개체 번호")
+                ax.set_ylabel(y_var)
+                ax.set_title("개체별 생육 특성 비교")
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                st.pyplot(fig)
+                plt.close()
+
+                st.subheader("\U0001f4ca 개체별 생육 성분 막대 그래프")
+                bar_vars = [v for v in growth_vars if v in ["지상부질량", "지하부질량", "생중량"]]
+
+                if bar_vars:
+                    fig, ax = plt.subplots(figsize=(12, 5))
+                    x = np.arange(len(growth_df))
+                    width = 0.25
+                    colors = {"지상부질량": "#2ecc71", "지하부질량": "#3498db", "생중량": "#e74c3c"}
+
+                    for i, var in enumerate(bar_vars):
+                        if var in growth_df.columns:
+                            ax.bar(x + i * width, growth_df[var], width, 
+                                   label=var, color=colors.get(var, "gray"), alpha=0.8)
+
+                    ax.set_xlabel("개체 번호")
+                    ax.set_ylabel("질량 (g)")
+                    ax.set_title("개체별 지상부/지하부/전체 질량 비교")
+                    ax.set_xticks(x + width)
+                    ax.set_xticklabels(growth_df["개체번호"])
+                    ax.legend()
+                    ax.grid(True, alpha=0.3, axis="y")
+                    st.pyplot(fig)
+                    plt.close()
+
+                st.subheader("\U0001f4c9 생육 변수 분포")
+                dist_var = st.selectbox("분포를 볼 변수", growth_vars)
+
+                fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+                data = growth_df[dist_var].dropna()
+                axes[0].hist(data, bins=max(10, len(data)//3), color="coral", edgecolor="white", alpha=0.8)
+                axes[0].axvline(data.mean(), color="red", linestyle="--", label=f"평균: {data.mean():.2f}")
+                axes[0].set_xlabel(dist_var)
+                axes[0].set_ylabel("개체 수")
+                axes[0].set_title(f"{dist_var} 분포")
+                axes[0].legend()
+                axes[0].grid(True, alpha=0.3)
+
+                bp = axes[1].boxplot([data], labels=[dist_var], patch_artist=True)
+                bp["boxes"][0].set_facecolor("lightcoral")
+                axes[1].set_ylabel(dist_var)
+                axes[1].set_title(f"{dist_var} 박스 플롯")
+                axes[1].grid(True, alpha=0.3, axis="y")
+
                 plt.tight_layout()
                 st.pyplot(fig)
-                plt.close(fig)
-                st.caption("※ 빨간 점선 구간은 센서가 측정하지 못한 빈 기간이 있을 수 있습니다.")
+                plt.close()
+            else:
+                st.warning("생육 데이터에 분석할 변수가 없습니다.")
 
-            # 결측 구간 확인
-            st.subheader("⏳ 결측(측정 누락) 구간 확인")
-            if "temperature" in env_mapped.columns:
-                temp_real = [a for a in ENV_COL_MAP["temperature"] if a in env_mapped.columns][0]
-                temp_vals = pd.to_numeric(env_mapped[temp_real], errors="coerce")
-                gap = env_time_col.isna() | temp_vals.isna()
-                gap_count = gap.sum()
-                total = len(env_time_col)
-                st.markdown(f"- **측정 있음**: {total - gap_count}회  ({round(100*(total-gap_count)/total,1)}%)")
-                st.markdown(f"- **결측 / 미측정**: {gap_count}회  ({round(100*gap_count/total,1)}%)")
+    with tab3:
+        st.subheader("\U0001f517 환경 조건과 생육의 관계 분석")
+        st.caption("""
+**상관관계란?** 두 값이 함께 움직이는 정도를 나타냅니다.
+- **양수(+) 상관**: 한 값이 증가할 때 다른 값도 증가 (예: 온도↑ → 생장↑)
+- **음수(-) 상관**: 한 값이 증가할 때 다른 값은 감소
+- **0에 가까움**: 두 값 사이에 뚜렷한 관계가 없음
+""")
 
-st.sidebar.markdown("---")
-st.sidebar.caption("📌 팁")
-st.sidebar.caption("1. csv 인코딩이 달라도 utf-8-sig / cp949 / utf-8 자동 감지")
-st.sidebar.caption("2. 열 이름이 달라도 매핑 테이블로 자동 대응")
-st.sidebar.caption("3. 한글 폰트 자동 탐색 (matplotlib + streamlit)")
+        if env_df is not None and growth_df is not None:
+            env_vars = [col for col in ["temperature", "humidity", "ec", "ph", "water_temp", "co2"] 
+                       if col in env_df.columns]
+            growth_vars = [col for col in ["잎 수", "지상부 길이", "지하부 길이", "생중량", "지상부질량", "지하부질량"] 
+                          if col in growth_df.columns]
+
+            if env_vars and growth_vars:
+                if "datetime" in env_df.columns:
+                    env_time_range = (env_df["datetime"].min(), env_df["datetime"].max())
+                    st.info(f"\U0001f535 환경 데이터 기간: {env_time_range[0]} ~ {env_time_range[1]}")
+                else:
+                    st.warning("\u26a0\ufe0f 환경 데이터에 시간 정보가 없어 생육 데이터와 직접 매칭이 어렵습니다.")
+
+                st.subheader("\U0001f4ca 환경-생육 상관계수 행렬")
+                st.warning("""
+**참고**: 이 분석은 환경 데이터 전체 평균과 각 개체의 생육 결과를 단순 비교한 것입니다.
+정확한 분석을 위해서는 각 개체가 자란 기간의 환경 데이터를 매칭해야 합니다.
+""")
+
+                corr_data = {}
+                for g_var in growth_vars:
+                    if g_var not in growth_df.columns:
+                        continue
+                    g_values = growth_df[g_var].values
+                    corr_data[g_var] = {}
+                    for e_var in env_vars:
+                        if len(env_df) >= len(growth_df):
+                            step = len(env_df) // len(growth_df)
+                            if step > 0:
+                                env_avg = [env_df[e_var].iloc[i*step:(i+1)*step].mean() 
+                                         for i in range(len(growth_df))]
+                                env_avg = env_avg[:len(growth_df)]
+                            else:
+                                env_avg = [env_df[e_var].mean()] * len(growth_df)
+                        else:
+                            env_avg = [env_df[e_var].mean()] * len(growth_df)
+
+                        if len(env_avg) == len(g_values) and np.std(env_avg) > 0:
+                            corr = np.corrcoef(env_avg, g_values)[0, 1]
+                            corr_data[g_var][e_var] = corr
+                        else:
+                            corr_data[g_var][e_var] = np.nan
+
+                corr_df = pd.DataFrame(corr_data).T.round(3)
+                corr_df = corr_df[env_vars]
+
+                if not corr_df.empty:
+                    st.dataframe(corr_df, use_container_width=True)
+
+                    fig, ax = plt.subplots(figsize=(8, 6))
+                    im = ax.imshow(corr_df.values, cmap="RdBu_r", vmin=-1, vmax=1, aspect="auto")
+                    ax.set_xticks(range(len(corr_df.columns)))
+                    ax.set_xticklabels(corr_df.columns, rotation=45, ha="right")
+                    ax.set_yticks(range(len(corr_df.index)))
+                    ax.set_yticklabels(corr_df.index)
+                    ax.set_title("환경-생육 상관관계 히트맵")
+
+                    for i in range(len(corr_df.index)):
+                        for j in range(len(corr_df.columns)):
+                            val = corr_df.values[i, j]
+                            if not np.isnan(val):
+                                color = "white" if abs(val) > 0.5 else "black"
+                                ax.text(j, i, f"{val:.2f}", ha="center", va="center", 
+                                       color=color, fontsize=10)
+
+                    plt.colorbar(im, ax=ax, label="상관계수")
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    plt.close()
+
+                    st.subheader("\U0001f4a1 주요 상관관계 해석")
+                    strong_corr = []
+                    for g_var in corr_df.index:
+                        for e_var in corr_df.columns:
+                            val = corr_df.loc[g_var, e_var]
+                            if not np.isnan(val) and abs(val) > 0.3:
+                                direction = "함께 증가" if val > 0 else "반대 방향"
+                                strong_corr.append(f"**{g_var}** <-> **{e_var}**: r = {val:.2f} ({direction})")
+
+                    if strong_corr:
+                        for item in strong_corr:
+                            st.write(f"- {item}")
+                    else:
+                        st.write("상관계수가 0.3을 넘는 관계가 발견되지 않았습니다.")
+                else:
+                    st.warning("상관계수를 계산할 수 없습니다.")
+            else:
+                if not env_vars:
+                    st.warning("환경 데이터가 없어 상관관계를 분석할 수 없습니다.")
+                if not growth_vars:
+                    st.warning("생육 데이터가 없어 상관관계를 분석할 수 없습니다.")
+        else:
+            st.warning("환경 데이터와 생육 데이터를 모두 업로드해야 상관관계를 분석할 수 있습니다.")
+
+# ============================================================
+# 데이터 내보내기
+# ============================================================
+if env_df is not None or growth_df is not None:
+    st.divider()
+    st.subheader("\U0001f4be 데이터 내보내기")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        if env_df is not None:
+            csv = env_df.to_csv(index=False).encode("utf-8-sig")
+            st.download_button(
+                label="\U0001f4e1 환경 데이터 다운로드 (utf-8-sig)",
+                data=csv,
+                file_name="processed_environment.csv",
+                mime="text/csv"
+            )
+
+    with col2:
+        if growth_df is not None:
+            csv = growth_df.to_csv(index=False).encode("utf-8-sig")
+            st.download_button(
+                label="\U0001f4e1 생육 데이터 다운로드 (utf-8-sig)",
+                data=csv,
+                file_name="processed_growth.csv",
+                mime="text/csv"
+            )
+
+# ============================================================
+# 푸터
+# ============================================================
+st.divider()
+st.caption("""
+**참고 사항**
+- 이 대시보드는 utf-8-sig/cp949 인코딩과 다양한 열 이름 형식을 자동 처리합니다
+- 한글 폰트는 Noto Sans CJK KR을 사용하여 Streamlit Cloud에서도 깨지지 않습니다
+- 통계 용어 설명은 고등학생이 이해하기 쉽도록 작성되었습니다
+- 환경 데이터와 생육 데이터의 시간 정보가 다를 경우 상관관계 분석에 제한이 있을 수 있습니다
+""")
